@@ -267,7 +267,6 @@
   <div class="page-lock-card">
     <p class="page-lock-eyebrow">PayEasy · 17Life 招募協作</p>
     <h1 class="page-lock-title">招募追蹤報表</h1>
-    <p class="page-lock-desc">這是共用的招募協作工具，請輸入存取碼以繼續（存取碼請向主管索取）。</p>
 
     <div id="lockChecking" class="page-lock-state" style="display:none;">
       <p class="page-lock-hint">驗證中…</p>
@@ -279,10 +278,19 @@
     </div>
 
     <div id="lockForm" class="page-lock-state">
+      <p class="page-lock-desc">這是共用的招募協作工具，請輸入存取碼以繼續（存取碼請向主管索取）。</p>
       <label for="lockInput" style="margin-top:0;">存取碼</label>
       <input type="password" id="lockInput" placeholder="請輸入存取碼" autocomplete="off">
       <p class="page-lock-error" id="lockError"></p>
       <button type="button" class="btn primary" id="lockSubmitBtn" style="width:100%; margin-top:14px;">進入</button>
+    </div>
+
+    <div id="lockNameForm" class="page-lock-state" style="display:none;">
+      <p class="page-lock-desc">請輸入你的顯示名稱，讓同事知道是誰在線上使用；輸入過一次後，這台裝置之後不用再重打。</p>
+      <label for="lockNameInput" style="margin-top:0;">使用者名稱</label>
+      <input type="text" id="lockNameInput" placeholder="例如：Amy" autocomplete="off">
+      <p class="page-lock-error" id="lockNameError"></p>
+      <button type="button" class="btn primary" id="lockNameSubmitBtn" style="width:100%; margin-top:14px;">進入</button>
     </div>
   </div>
 </div>
@@ -1104,11 +1112,13 @@ async function sheetsPost(sheet, records){
 
 // ---------- 全頁密碼鎖（進入前需輸入正確存取碼，否則看不到任何頁面內容） ----------
 function setLockState(state, msg){
-  // state: 'form' | 'checking' | 'network'
+  // state: 'form' | 'checking' | 'network' | 'name'
   $('lockForm').style.display = (state === 'form') ? 'block' : 'none';
   $('lockChecking').style.display = (state === 'checking') ? 'block' : 'none';
   $('lockNetworkError').style.display = (state === 'network') ? 'block' : 'none';
-  $('lockError').textContent = (state === 'form') ? (msg || '') : '';
+  $('lockNameForm').style.display = (state === 'name') ? 'block' : 'none';
+  if(state === 'form') $('lockError').textContent = msg || '';
+  if(state === 'name') $('lockNameError').textContent = msg || '';
 }
 function hideLockScreen(){
   $('pageLock').style.display = 'none';
@@ -1148,8 +1158,7 @@ async function initPageLock(){
     setLockState('checking');
     const result = await verifyAccessCode(accessCode);
     if(result === 'ok'){
-      hideLockScreen();
-      loadAll();
+      proceedAfterCodeOk();
       return;
     }
     if(result === 'invalid'){
@@ -1162,6 +1171,18 @@ async function initPageLock(){
     return;
   }
   setLockState('form');
+}
+
+// 存取碼驗證通過後的下一關：這台裝置如果還沒存過顯示名稱，強制要求輸入（不能跳過），
+// 有存過就直接放行進入頁面，不用每次重打。
+function proceedAfterCodeOk(){
+  if(!userName){
+    setLockState('name');
+    setTimeout(()=> $('lockNameInput') && $('lockNameInput').focus(), 50);
+    return;
+  }
+  hideLockScreen();
+  loadAll();
 }
 
 async function submitLockForm(){
@@ -1178,8 +1199,7 @@ async function submitLockForm(){
   if(result === 'ok'){
     accessCode = code;
     try{ localStorage.setItem(ACCESS_CODE_KEY, accessCode); }catch(e){}
-    hideLockScreen();
-    loadAll();
+    proceedAfterCodeOk();
   } else if(result === 'invalid'){
     setLockState('form', '存取碼不正確，請再試一次');
     input.value = '';
@@ -1191,6 +1211,19 @@ async function submitLockForm(){
 $('lockSubmitBtn').addEventListener('click', submitLockForm);
 $('lockInput').addEventListener('keydown', (e)=>{ if(e.key === 'Enter') submitLockForm(); });
 $('lockRetryBtn').addEventListener('click', initPageLock);
+
+// 使用者名稱：v4 起改為必填，存取碼驗證通過但這台裝置沒存過名稱時會卡在這一關，沒有「跳過」選項
+function submitLockNameForm(){
+  const input = $('lockNameInput');
+  const name = input.value.trim();
+  if(!name){ setLockState('name', '請輸入使用者名稱'); return; }
+  userName = name;
+  try{ localStorage.setItem(USER_NAME_KEY, userName); }catch(e){}
+  hideLockScreen();
+  loadAll();
+}
+$('lockNameSubmitBtn').addEventListener('click', submitLockNameForm);
+$('lockNameInput').addEventListener('keydown', (e)=>{ if(e.key === 'Enter') submitLockNameForm(); });
 
 async function loadAll(){
   sheetsUnreachable = false;
