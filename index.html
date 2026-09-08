@@ -1089,6 +1089,32 @@ function stopHeartbeatLoop(){
   if(el) el.innerHTML = '';
 }
 
+// 背景自動重新整理：每 30 秒重新抓一次共用試算表的最新資料，只更新右側清單/報表，
+// 不會動到使用者正在填寫的左側表單（表單內容是獨立的 DOM 狀態，不受 callRecords/trackRecords 陣列更新影響）
+let autoRefreshTimer = null;
+async function autoRefreshData(){
+  if(storageMode !== 'sheets') return; // 只有連上共用資料庫時才需要背景同步
+  try{
+    const data = await sheetsGet('read');
+    callRecords = data.callRecords || [];
+    trackRecords = data.trackRecords || [];
+    normalizeRecordTypes(callRecords, callSchema);
+    normalizeRecordTypes(trackRecords, trackSchema);
+    ensureTrackOrder();
+    if(migrateStageNames()) await saveTracks();
+    renderAll();
+  }catch(e){
+    // 背景同步失敗不特別提示，避免干擾操作；下一次還會再試
+  }
+}
+function startAutoRefreshLoop(){
+  if(autoRefreshTimer) clearInterval(autoRefreshTimer);
+  autoRefreshTimer = setInterval(autoRefreshData, 30000);
+}
+function stopAutoRefreshLoop(){
+  if(autoRefreshTimer){ clearInterval(autoRefreshTimer); autoRefreshTimer = null; }
+}
+
 async function sheetsGet(action, params){
   const url = new URL(SHEETS_API_URL);
   url.searchParams.set('action', action);
@@ -1243,6 +1269,7 @@ async function loadAll(){
         loadedFromSheets = true;
         await ensureUserName();
         startHeartbeatLoop();
+        startAutoRefreshLoop();
       }catch(e){
         if(e.message === 'unauthorized'){
           try{ localStorage.removeItem(ACCESS_CODE_KEY); }catch(err){}
@@ -1251,10 +1278,12 @@ async function loadAll(){
         }
         sheetsUnreachable = true;
         stopHeartbeatLoop();
+        stopAutoRefreshLoop();
       }
     } else {
       sheetsUnreachable = true;
       stopHeartbeatLoop();
+      stopAutoRefreshLoop();
     }
   }
 
