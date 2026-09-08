@@ -286,7 +286,7 @@
     </div>
 
     <div id="lockNameForm" class="page-lock-state" style="display:none;">
-      <p class="page-lock-desc">請輸入你的顯示名稱，讓同事知道是誰在線上使用；輸入過一次後，這台裝置之後不用再重打。</p>
+      <p class="page-lock-desc">請輸入你的顯示名稱，讓同事知道是誰在線上使用；每次重新整理或打開頁面都需要重新輸入。</p>
       <label for="lockNameInput" style="margin-top:0;">使用者名稱</label>
       <input type="text" id="lockNameInput" placeholder="例如：Amy" autocomplete="off">
       <p class="page-lock-error" id="lockNameError"></p>
@@ -1039,7 +1039,9 @@ async function ensureAccessCode(){
 
 const USER_NAME_KEY = 'recruit-user-name';
 let userName = '';
-try{ userName = localStorage.getItem(USER_NAME_KEY) || ''; }catch(e){ userName = ''; }
+// v4 再更新：使用者名稱改成每次都要重新輸入，不再快取於瀏覽器；
+// 這裡故意不從 localStorage 讀取，也順便清掉舊版本可能留下的舊快取值，避免殘留造成混淆
+try{ localStorage.removeItem(USER_NAME_KEY); }catch(e){}
 let heartbeatTimer = null;
 
 async function ensureUserName(){
@@ -1217,8 +1219,7 @@ function submitLockNameForm(){
   const input = $('lockNameInput');
   const name = input.value.trim();
   if(!name){ setLockState('name', '請輸入使用者名稱'); return; }
-  userName = name;
-  try{ localStorage.setItem(USER_NAME_KEY, userName); }catch(e){}
+  userName = name; // 只存在這次瀏覽的記憶體裡，不寫入 localStorage，下次進入還是會要求重新輸入
   hideLockScreen();
   loadAll();
 }
