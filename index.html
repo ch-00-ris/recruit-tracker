@@ -94,6 +94,7 @@
   .more-fields-toggle{display:flex; align-items:center; gap:6px; font-size:13px; color:var(--primary); cursor:pointer; margin:14px 0 4px; user-select:none;}
   .more-fields-toggle .more-chevron{font-size:11px;}
   .more-fields-box{border-top:1px solid var(--border); padding-top:4px; margin-top:10px;}
+  .other-select-input{margin-top:6px;}
 
   .stats{display:grid; grid-template-columns:repeat(auto-fit, minmax(150px,1fr)); gap:14px; margin-bottom:20px;}
   @media (max-width:700px){.stats{grid-template-columns:repeat(2,1fr);}}
@@ -635,6 +636,27 @@ $('stageDetailCloseBtn').addEventListener('click', ()=>{ $('stageDetailOverlay')
 $('stageDetailOverlay').addEventListener('click', (e)=>{ if(e.target.id === 'stageDetailOverlay') $('stageDetailOverlay').style.display = 'none'; });
 
 const SOURCE_CHANNEL_OPTS = ['104主投','陌生開發','員工推薦','陌生開發(獵頭/管顧)','徵才活動','小雞上工'];
+// 來源管道下拉選單：固定選項之外，再併入電訪紀錄／面試進度追蹤裡已經出現過的自訂來源，
+// 讓同事手動新增過的來源之後也能直接從下拉選單選取，不用每次重打
+function getSourceChannelOptions(){
+  const used = new Set([
+    ...callRecords.map(r=>r.source),
+    ...trackRecords.map(r=>r.channel)
+  ].map(v=>(v||'').trim()).filter(Boolean));
+  const extra = [...used].filter(v=>!SOURCE_CHANNEL_OPTS.includes(v)).sort();
+  return [...SOURCE_CHANNEL_OPTS, ...extra];
+}
+// 重新整理表單裡「選項為動態函式」的下拉選單（例如「來源管道」會併入同事手動新增過的來源），
+// 只更新選項內容、保留目前已選的值，避免影響使用者正在填寫的其他欄位；不會重繪整個表單（那會清空使用者正在輸入的內容）
+function refreshDynamicSelectFields(schema, prefix){
+  schema.filter(f=>f.type==='select' && typeof f.options==='function').forEach(f=>{
+    const sel = $(`${prefix}-${f.key}`);
+    if(!sel) return;
+    const current = sel.value;
+    sel.innerHTML = buildSelectOptionsHtml(f);
+    if([...sel.options].some(o=>o.value === current)) sel.value = current;
+  });
+}
 
 function guessSourceChannel(raw){
   const v = (raw || '').trim();
@@ -680,7 +702,7 @@ function trackStatusKey(r){
 const callSchema = [
   {key:'company', label:'公司', type:'select', options:COMPANIES, required:true, primary:true},
   {key:'contactDate', label:'聯繫日期', type:'date', required:true, primary:true},
-  {key:'source', label:'來源管道', type:'select', options:SOURCE_CHANNEL_OPTS, required:false},
+  {key:'source', label:'來源管道', type:'select', options:getSourceChannelOptions, allowOther:true, required:false},
   {key:'name', label:'姓名', type:'text', required:true, primary:true},
   {key:'code', label:'代碼', type:'text', required:false},
   {key:'title104', label:'104職稱', type:'text', required:false},
@@ -696,7 +718,7 @@ const trackSchema = [
   {key:'name', label:'候選人姓名', type:'text', required:true, primary:true},
   {key:'position', label:'應徵職位', type:'text', required:false},
   {key:'department', label:'應徵部門', type:'text', required:false},
-  {key:'channel', label:'來源管道', type:'select', options:SOURCE_CHANNEL_OPTS, required:false},
+  {key:'channel', label:'來源管道', type:'select', options:getSourceChannelOptions, allowOther:true, required:false},
   {key:'stage', label:'目前階段', type:'select', options:STAGE_OPTS, required:true, primary:true},
   {key:'note', label:'備註/婉拒原因', type:'textarea', required:false},
   {key:'interviewDate', label:'面試日期', type:'date', required:false},
@@ -715,11 +737,21 @@ let trackEditingId = null;
 let activeTab = 'call';
 
 // ---------- generic form helpers ----------
+// select 選單的 <option> 組合：options 可以是固定陣列，也可以是動態函式（例如「來源管道」會併入既有紀錄裡出現過的自訂來源）；
+// allowOther 為 true 時，選單最後會多一個「＋其他（手動輸入）」，選到之後在旁邊的文字輸入框手動填寫
+function buildSelectOptionsHtml(f){
+  const optionList = typeof f.options === 'function' ? f.options() : f.options;
+  const opts = optionList.map(o=>`<option value="${escapeHtml(o)}">${escapeHtml(o)}</option>`).join('');
+  const otherOpt = f.allowOther ? `<option value="__other__">＋ 其他（手動輸入）</option>` : '';
+  return `<option value="">請選擇</option>${opts}${otherOpt}`;
+}
 function fieldInputHtml(f, prefix){
   let input;
   if(f.type === 'select'){
-    const opts = f.options.map(o=>`<option value="${escapeHtml(o)}">${escapeHtml(o)}</option>`).join('');
-    input = `<select id="${prefix}-${f.key}"><option value="">請選擇</option>${opts}</select>`;
+    input = `<select id="${prefix}-${f.key}">${buildSelectOptionsHtml(f)}</select>`;
+    if(f.allowOther){
+      input += `<input type="text" id="${prefix}-${f.key}-other" class="other-select-input" style="display:none;" placeholder="請輸入新的${f.label}名稱">`;
+    }
   } else if(f.type === 'date'){
     input = `<input type="date" id="${prefix}-${f.key}">`;
   } else if(f.type === 'textarea'){
@@ -750,6 +782,18 @@ function renderFormFields(schema, containerId, prefix, quickMode){
   }
   el.innerHTML = html;
 
+  // 「來源管道」等可手動新增其他選項的下拉選單：選到「＋其他」時顯示手動輸入欄位
+  schema.filter(f=>f.type==='select' && f.allowOther).forEach(f=>{
+    const sel = $(`${prefix}-${f.key}`);
+    const otherInput = $(`${prefix}-${f.key}-other`);
+    if(!sel || !otherInput) return;
+    sel.addEventListener('change', ()=>{
+      const isOther = sel.value === '__other__';
+      otherInput.style.display = isOther ? 'block' : 'none';
+      if(isOther) otherInput.focus(); else otherInput.value = '';
+    });
+  });
+
   const toggleEl = $(`${prefix}-more-toggle`);
   if(toggleEl){
     toggleEl.addEventListener('click', ()=>{
@@ -766,7 +810,12 @@ function collectForm(schema, prefix){
   schema.forEach(f=>{
     const el = $(`${prefix}-${f.key}`);
     if(!el){ obj[f.key] = f.type === 'checkbox' ? false : ''; return; }
-    obj[f.key] = f.type === 'checkbox' ? el.checked : el.value.trim();
+    let val = f.type === 'checkbox' ? el.checked : el.value.trim();
+    if(f.type === 'select' && f.allowOther && val === '__other__'){
+      const otherEl = $(`${prefix}-${f.key}-other`);
+      val = otherEl ? otherEl.value.trim() : '';
+    }
+    obj[f.key] = val;
   });
   return obj;
 }
@@ -774,8 +823,21 @@ function fillForm(schema, prefix, record){
   schema.forEach(f=>{
     const el = $(`${prefix}-${f.key}`);
     if(!el) return;
-    if(f.type === 'checkbox') el.checked = !!record[f.key];
-    else el.value = record[f.key] || '';
+    if(f.type === 'checkbox'){ el.checked = !!record[f.key]; return; }
+    if(f.type === 'select' && f.allowOther){
+      const val = record[f.key] || '';
+      const otherEl = $(`${prefix}-${f.key}-other`);
+      const hasOption = [...el.options].some(o=>o.value === val);
+      if(val && !hasOption){
+        el.value = '__other__';
+        if(otherEl){ otherEl.value = val; otherEl.style.display = 'block'; }
+      } else {
+        el.value = val;
+        if(otherEl){ otherEl.value = ''; otherEl.style.display = 'none'; }
+      }
+      return;
+    }
+    el.value = record[f.key] || '';
   });
 }
 function clearForm(schema, prefix){
@@ -784,6 +846,10 @@ function clearForm(schema, prefix){
     if(!el) return;
     if(f.type === 'checkbox') el.checked = !!f.default;
     else el.value = f.default || '';
+    if(f.type === 'select' && f.allowOther){
+      const otherEl = $(`${prefix}-${f.key}-other`);
+      if(otherEl){ otherEl.value = ''; otherEl.style.display = 'none'; }
+    }
   });
   const reqDate = schema.find(f=>f.type === 'date' && f.required);
   if(reqDate){ const el = $(`${prefix}-${reqDate.key}`); if(el) el.value = todayStr(); }
@@ -1650,6 +1716,7 @@ function getCallsInRange(){
 }
 
 function renderCallTab(){
+  refreshDynamicSelectFields(callSchema, 'call');
   const ranged = getCallsInRange();
   const total = ranged.length;
   const invited = ranged.filter(r=>r.willingness === '成功邀約').length;
@@ -1811,6 +1878,7 @@ function getTracksInRange(){
 }
 
 function renderTrackTab(){
+  refreshDynamicSelectFields(trackSchema, 'track');
   const ranged = getTracksInRange();
   STAGE_STAT_FIELDS.forEach(f=>{
     const count = ranged.filter(r=>!r.closed && !r.blacklisted && r.stage === f.stage).length;
@@ -2186,7 +2254,7 @@ function renderSelectValueMaps(schema){
     if(distinct.length === 0) return;
     any = true;
 
-    const options = f.type === 'checkbox' ? [(f.falseLabel || '進行中'), (f.trueLabel || '已結案')] : f.options;
+    const options = f.type === 'checkbox' ? [(f.falseLabel || '進行中'), (f.trueLabel || '已結案')] : (typeof f.options === 'function' ? f.options() : f.options);
     const block = document.createElement('div');
     block.style.marginBottom = '16px';
     const title = document.createElement('label');
