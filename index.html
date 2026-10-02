@@ -274,7 +274,7 @@
     </div>
 
     <div id="lockNetworkError" class="page-lock-state" style="display:none;">
-      <p class="page-lock-hint page-lock-hint-error">目前連不上伺服器，請檢查網路連線後再試一次。</p>
+      <p class="page-lock-hint page-lock-hint-error" id="lockNetworkMsg">目前連不上伺服器，請檢查網路連線後再試一次。</p>
       <button type="button" class="btn primary" id="lockRetryBtn" style="width:100%;">重新嘗試</button>
     </div>
 
@@ -542,7 +542,9 @@
 const $ = (id) => document.getElementById(id);
 function todayStr(){ return new Date().toISOString().slice(0,10); }
 function escapeHtml(s){ return String(s ?? '').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-function showToast(msg){ const t=$('toast'); t.textContent=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),1900); }
+// v4.1：較長的錯誤訊息停留久一點（最多 6 秒），避免還沒看完就消失；重複呼叫時以最新一則為準
+let toastTimer = null;
+function showToast(msg){ const t=$('toast'); t.textContent=msg; t.classList.add('show'); if(toastTimer) clearTimeout(toastTimer); toastTimer = setTimeout(()=>t.classList.remove('show'), Math.min(6000, Math.max(1900, String(msg).length * 90))); }
 
 function showConfirm(message){
   return new Promise(resolve=>{
@@ -1060,6 +1062,7 @@ const ACCESS_CODE_KEY = 'recruit-access-code';
 
 let storageMode = 'cloud'; // 'sheets' (shared Google Sheets) | 'cloud' (Claude window.storage) | 'local' (browser localStorage) | 'none'
 let sheetsUnreachable = false;
+let sheetsLastError = null; // v4.1：最近一次連共用資料庫失敗的原因，顯示在上方警示框
 let accessCode = '';
 try{ accessCode = localStorage.getItem(ACCESS_CODE_KEY) || ''; }catch(e){ accessCode = ''; }
 
@@ -1181,27 +1184,72 @@ function stopAutoRefreshLoop(){
   if(autoRefreshTimer){ clearInterval(autoRefreshTimer); autoRefreshTimer = null; }
 }
 
+// v4.1：共用資料庫的讀寫統一經過 sheetsRequest()，把失敗原因分成四類（err.kind），
+// 讓畫面提示能分辨「真的連不上網路」跟「伺服器有回應、但 Google 端出錯/忙碌」，不再一律顯示「請檢查網路連線」；
+// 遇到暫時性錯誤（連線中斷、伺服器忙碌/逾時）會自動重試，最多共 3 次
+//   network：瀏覽器根本沒收到回應（斷網、被公司網路擋、請求等太久被中斷）
+//   auth   ：存取碼不正確（unauthorized）
+//   busy   ：多人同時存檔，後端排隊等太久（需搭配 v4.1 後端）
+//   server ：伺服器有回應，但回傳錯誤（訊息會附在 err.message）
+const SHEETS_TIMEOUT_MS = 40000;
+function makeSheetsError(kind, message){ const e = new Error(message); e.kind = kind; return e; }
+function isTransientSheetsError(e){
+  if(e.kind === 'network' || e.kind === 'busy') return true;
+  return e.kind === 'server' && /HTTP 5\d\d|timed out|timeout|逾時|忙碌|Service|try again|格式異常/i.test(e.message);
+}
+async function sheetsRequest(url, options){
+  let lastErr = null;
+  for(let attempt = 0; attempt < 3; attempt++){
+    if(attempt > 0) await new Promise(r => setTimeout(r, 1500 * attempt));
+    try{
+      let res;
+      const ctrl = (typeof AbortController === 'function') ? new AbortController() : null;
+      const timer = ctrl ? setTimeout(()=> ctrl.abort(), SHEETS_TIMEOUT_MS) : null;
+      try{
+        res = await fetch(url, Object.assign({}, options || {}, ctrl ? {signal: ctrl.signal} : {}));
+      }catch(e){
+        throw makeSheetsError('network', (e && e.name === 'AbortError') ? '伺服器回應逾時' : '連不上伺服器');
+      }finally{
+        if(timer) clearTimeout(timer);
+      }
+      if(!res.ok) throw makeSheetsError('server', 'HTTP ' + res.status);
+      let json;
+      try{ json = await res.json(); }
+      catch(e){ throw makeSheetsError('server', '伺服器回傳格式異常'); }
+      if(json.ok) return json;
+      const msg = json.error || '未知錯誤';
+      if(msg === 'unauthorized') throw makeSheetsError('auth', msg);
+      throw makeSheetsError(msg === 'busy' ? 'busy' : 'server', msg);
+    }catch(e){
+      lastErr = e.kind ? e : makeSheetsError('server', String(e && e.message || e));
+      if(!isTransientSheetsError(lastErr)) break; // 存取碼錯誤、或非暫時性的伺服器錯誤就不重試
+    }
+  }
+  throw lastErr;
+}
 async function sheetsGet(action, params){
   const url = new URL(SHEETS_API_URL);
   url.searchParams.set('action', action);
   url.searchParams.set('code', accessCode);
   Object.entries(params || {}).forEach(([k,v])=> url.searchParams.set(k, v));
-  const res = await fetch(url.toString());
-  if(!res.ok) throw new Error('HTTP ' + res.status);
-  const json = await res.json();
-  if(!json.ok) throw new Error(json.error || '未知錯誤');
+  const json = await sheetsRequest(url.toString());
   return json.data;
 }
 async function sheetsPost(sheet, records){
-  const res = await fetch(SHEETS_API_URL, {
+  await sheetsRequest(SHEETS_API_URL, {
     method: 'POST',
     headers: {'Content-Type': 'text/plain;charset=utf-8'}, // avoids CORS preflight against Apps Script
     body: JSON.stringify({ sheet, records, code: accessCode })
   });
-  if(!res.ok) throw new Error('HTTP ' + res.status);
-  const json = await res.json();
-  if(!json.ok) throw new Error(json.error || '未知錯誤');
   return true;
+}
+// 把錯誤轉成給使用者看的說明（存檔提示、上方警示框共用）
+function describeSheetsError(e){
+  if(!e) return '原因不明';
+  if(e.kind === 'network') return e.message === '伺服器回應逾時' ? '伺服器回應太久（Google 端忙碌或公司網路中斷了連線）' : '連不上伺服器，請檢查網路連線';
+  if(e.kind === 'auth') return '存取碼已變更，請按「重新整理資料」重新輸入';
+  if(e.kind === 'busy') return '同事正在同時存檔，請稍等幾秒再試一次';
+  return '伺服器錯誤：' + String(e.message || '未知錯誤').slice(0, 120);
 }
 
 // ---------- 全頁密碼鎖（進入前需輸入正確存取碼，否則看不到任何頁面內容） ----------
@@ -1229,13 +1277,11 @@ async function verifyAccessCode(code){
     const url = new URL(SHEETS_API_URL);
     url.searchParams.set('action', 'read');
     url.searchParams.set('code', code);
-    const res = await fetch(url.toString());
-    if(!res.ok) return 'network';
-    const json = await res.json();
-    if(json.ok) return 'ok';
-    if(json.error === 'unauthorized') return 'invalid';
-    return 'network';
+    await sheetsRequest(url.toString()); // v4.1：跟一般讀取共用同一套重試/逾時機制
+    return 'ok';
   }catch(e){
+    if(e.kind === 'auth') return 'invalid';
+    sheetsLastError = e;
     return 'network';
   }
 }
@@ -1261,6 +1307,7 @@ async function initPageLock(){
       setLockState('form', '存取碼已變更或不正確，請重新輸入');
       return;
     }
+    $('lockNetworkMsg').textContent = '目前無法連上共用資料庫（' + describeSheetsError(sheetsLastError) + '），請稍後按「重新嘗試」。';
     setLockState('network');
     return;
   }
@@ -1299,7 +1346,7 @@ async function submitLockForm(){
     input.value = '';
     input.focus();
   } else {
-    setLockState('form', '無法連線到伺服器，請檢查網路後再試一次');
+    setLockState('form', '目前無法連上共用資料庫（' + describeSheetsError(sheetsLastError) + '），請再試一次');
   }
 }
 $('lockSubmitBtn').addEventListener('click', submitLockForm);
@@ -1337,11 +1384,12 @@ async function loadAll(){
         startHeartbeatLoop();
         startAutoRefreshLoop();
       }catch(e){
-        if(e.message === 'unauthorized'){
+        if(e.kind === 'auth'){
           try{ localStorage.removeItem(ACCESS_CODE_KEY); }catch(err){}
           accessCode = '';
           showToast('存取碼不正確，請按「重新整理資料」再輸入一次');
         }
+        sheetsLastError = e;
         sheetsUnreachable = true;
         stopHeartbeatLoop();
         stopAutoRefreshLoop();
@@ -1402,7 +1450,8 @@ function updateEnvBanner(){
     el.style.borderColor = 'var(--gold)';
     el.style.color = '#8a6a1f';
     if(sheetsUnreachable){
-      el.innerHTML = '<b>目前連不上共用資料庫</b>：暫時改用「這台電腦、這個瀏覽器」的本機資料，新增的內容不會同步給同事看到。請檢查網路連線後按右上角「重新整理資料」再試一次；在恢復連線前，建議先用「完整備份(JSON)」保留這段時間新增的資料，避免之後同步時遺漏。';
+      const reason = sheetsLastError ? describeSheetsError(sheetsLastError) : '原因不明';
+      el.innerHTML = '<b>目前連不上共用資料庫</b>（' + escapeHtml(reason) + '）：暫時改用「這台電腦、這個瀏覽器」的本機資料，新增的內容不會同步給同事看到。請按右上角「重新整理資料」再試一次；在恢復連線前，建議先用「完整備份(JSON)」保留這段時間新增的資料，避免之後同步時遺漏。若一直出現，請把這個訊息截圖給管理者。';
     } else {
       el.innerHTML = '<b>目前是個人電腦版</b>：資料會保存在「這台電腦、這個瀏覽器」裡，不會跟其他同事共用。建議定期用右上角「完整備份(JSON)」保存一份。';
     }
@@ -1443,7 +1492,7 @@ async function saveCalls(){
       await sheetsPost('call', callRecords);
       return true;
     }catch(e){
-      showToast('存到共用資料庫失敗，請檢查網路連線後再試一次');
+      showToast('存到共用資料庫失敗：' + describeSheetsError(e));
       return false;
     }
   }
@@ -1474,7 +1523,7 @@ async function saveTracks(){
       await sheetsPost('track', trackRecords);
       return true;
     }catch(e){
-      showToast('存到共用資料庫失敗，請檢查網路連線後再試一次');
+      showToast('存到共用資料庫失敗：' + describeSheetsError(e));
       return false;
     }
   }
